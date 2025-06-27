@@ -66,8 +66,6 @@ static size_t configured_source_stream_count;
 static const struct bt_bap_qos_cfg_pref qos_pref =
 	BT_BAP_QOS_CFG_PREF(true, BT_GAP_LE_PHY_2M, 0x02, 10, 40000, 40000, 40000, 40000);
 
-static K_SEM_DEFINE(sem_disconnected, 0, 1);
-
 static uint8_t unicast_server_addata[] = {
 	BT_UUID_16_ENCODE(BT_UUID_ASCS_VAL), /* ASCS UUID */
 	BT_AUDIO_UNICAST_ANNOUNCEMENT_TARGETED, /* Target Announcement */
@@ -86,6 +84,19 @@ static const struct bt_data ad[] = {
 
 #define AUDIO_DATA_TIMEOUT_US 1000000UL /* Send data every 1 second */
 #define SDU_INTERVAL_US       10000UL   /* 10 ms SDU interval */
+
+static struct bt_le_ext_adv *adv;
+static struct k_work adv_work;
+
+static void advertising_process(struct k_work *work)
+{
+       int err;
+       err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
+       if (err) {
+               printk("Failed to start advertising set (err %d)\n", err);
+       }
+       printk("Advertising successfully started\n");
+}
 
 static uint16_t get_and_incr_seq_num(const struct bt_bap_stream *stream)
 {
@@ -619,8 +630,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	bt_conn_unref(default_conn);
 	default_conn = NULL;
-
-	k_sem_give(&sem_disconnected);
+	configured_source_stream_count = 0;
+	k_work_cancel_delayable(&audio_send_work);
+	k_work_submit(&adv_work);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -723,7 +735,6 @@ static int set_available_contexts(void)
 
 int main(void)
 {
-	struct bt_le_ext_adv *adv;
 	int err;
 
 	err = bt_enable(NULL);
@@ -777,32 +788,16 @@ int main(void)
 		return 0;
 	}
 
+	if (CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT > 0) {
+		/* Start send timer */
+		k_work_init_delayable(&audio_send_work, audio_timer_timeout);
+	}
+
+    k_work_init(&adv_work, advertising_process);
+    k_work_submit(&adv_work);
+
 	while (true) {
-		struct k_work_sync sync;
-
-		err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
-		if (err) {
-			printk("Failed to start advertising set (err %d)\n", err);
-			return 0;
-		}
-
-		printk("Advertising successfully started\n");
-
-		if (CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT > 0) {
-			/* Start send timer */
-			k_work_init_delayable(&audio_send_work, audio_timer_timeout);
-		}
-
-		err = k_sem_take(&sem_disconnected, K_FOREVER);
-		if (err != 0) {
-			printk("failed to take sem_disconnected (err %d)\n", err);
-			return 0;
-		}
-
-		/* reset data */
-		configured_source_stream_count = 0U;
-		k_work_cancel_delayable_sync(&audio_send_work, &sync);
-
+		k_sleep(K_SECONDS(1));
 	}
 	return 0;
 }
