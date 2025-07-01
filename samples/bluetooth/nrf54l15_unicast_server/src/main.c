@@ -31,6 +31,8 @@
 #include <zephyr/sys/util_macro.h>
 #include <zephyr/sys_clock.h>
 #include <zephyr/types.h>
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 #define AVAILABLE_SINK_CONTEXT  (BT_AUDIO_CONTEXT_TYPE_UNSPECIFIED | \
 				 BT_AUDIO_CONTEXT_TYPE_CONVERSATIONAL | \
@@ -90,9 +92,9 @@ static void advertising_process(struct k_work *work)
        int err;
        err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
        if (err) {
-               printk("Failed to start advertising set (err %d)\n", err);
+               LOG_INF("Failed to start advertising set (err %d)", err);
        }
-       printk("Advertising successfully started\n");
+       LOG_INF("Advertising successfully started");
 }
 
 #include "lc3.h"
@@ -118,16 +120,15 @@ static bool print_cb(struct bt_data *data, void *user_data)
 {
 	const char *str = (const char *)user_data;
 
-	printk("%s: type 0x%02x value_len %u\n", str, data->type, data->data_len);
-	print_hex(data->data, data->data_len);
-	printk("\n");
+	LOG_INF("%s: type 0x%02x value_len %u", str, data->type, data->data_len);
+	LOG_HEXDUMP_INF(data->data, data->data_len, "value:");
 
 	return true;
 }
 
 static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 {
-	printk("codec_cfg 0x%02x cid 0x%04x vid 0x%04x count %u\n", codec_cfg->id, codec_cfg->cid,
+	LOG_INF("codec_cfg 0x%02x cid 0x%04x vid 0x%04x count %u", codec_cfg->id, codec_cfg->cid,
 	       codec_cfg->vid, codec_cfg->data_len);
 
 	if (codec_cfg->id == BT_HCI_CODING_FORMAT_LC3) {
@@ -140,23 +141,23 @@ static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 
 		ret = bt_audio_codec_cfg_get_freq(codec_cfg);
 		if (ret > 0) {
-			printk("  Frequency: %d Hz\n", bt_audio_codec_cfg_freq_to_freq_hz(ret));
+			LOG_INF("  Frequency: %d Hz", bt_audio_codec_cfg_freq_to_freq_hz(ret));
 		}
 
 		ret = bt_audio_codec_cfg_get_frame_dur(codec_cfg);
 		if (ret > 0) {
-			printk("  Frame Duration: %d us\n",
+			LOG_INF("  Frame Duration: %d us",
 			       bt_audio_codec_cfg_frame_dur_to_frame_dur_us(ret));
 		}
 
 		ret = bt_audio_codec_cfg_get_chan_allocation(codec_cfg, &chan_allocation, false);
 		if (ret == 0) {
-			printk("  Channel allocation: 0x%x\n", chan_allocation);
+			LOG_INF("  Channel allocation: 0x%x", chan_allocation);
 		}
 
-		printk("  Octets per frame: %d (negative means value not pressent)\n",
+		LOG_INF("  Octets per frame: %d (negative means value not pressent)",
 		       bt_audio_codec_cfg_get_octets_per_frame(codec_cfg));
-		printk("  Frames per SDU: %d\n",
+		LOG_INF("  Frames per SDU: %d",
 		       bt_audio_codec_cfg_get_frame_blocks_per_sdu(codec_cfg, true));
 	} else {
 		print_hex(codec_cfg->data, codec_cfg->data_len);
@@ -167,8 +168,8 @@ static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 
 static void print_qos(const struct bt_bap_qos_cfg *qos)
 {
-	printk("QoS: interval %u framing 0x%02x phy 0x%02x sdu %u "
-	       "rtn %u latency %u pd %u\n",
+	LOG_INF("QoS: interval %u framing 0x%02x phy 0x%02x sdu %u "
+	       "rtn %u latency %u pd %u",
 	       qos->interval, qos->framing, qos->phy, qos->sdu,
 	       qos->rtn, qos->latency, qos->pd);
 }
@@ -187,7 +188,7 @@ static enum bt_audio_dir stream_dir(const struct bt_bap_stream *stream)
 		}
 	}
 
-	__ASSERT(false, "Invalid stream %p", stream);
+	__ASSERT(false, "Invalid stream %p", (void *) stream);
 	return 0;
 }
 
@@ -218,19 +219,19 @@ static int lc3_config(struct bt_conn *conn, const struct bt_bap_ep *ep, enum bt_
 		      const struct bt_audio_codec_cfg *codec_cfg, struct bt_bap_stream **stream,
 		      struct bt_bap_qos_cfg_pref *const pref, struct bt_bap_ascs_rsp *rsp)
 {
-	printk("ASE Codec Config: conn %p ep %p dir %u\n", conn, ep, dir);
+	LOG_INF("ASE Codec Config: conn %p ep %p dir %u", (void *) conn, (void *) ep, dir);
 
 	print_codec_cfg(codec_cfg);
 
 	*stream = stream_alloc(dir);
 	if (*stream == NULL) {
-		printk("No streams available\n");
+		LOG_INF("No streams available");
 		*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_NO_MEM, BT_BAP_ASCS_REASON_NONE);
 
 		return -ENOMEM;
 	}
 
-	printk("ASE Codec Config stream %p\n", *stream);
+	LOG_INF("ASE Codec Config stream %p", (void *) *stream);
 
 	if (dir == BT_AUDIO_DIR_SOURCE) {
 		configured_source_stream_count++;
@@ -250,7 +251,7 @@ static int lc3_reconfig(struct bt_bap_stream *stream, enum bt_audio_dir dir,
 			const struct bt_audio_codec_cfg *codec_cfg,
 			struct bt_bap_qos_cfg_pref *const pref, struct bt_bap_ascs_rsp *rsp)
 {
-	printk("ASE Codec Reconfig: stream %p\n", stream);
+	LOG_INF("ASE Codec Reconfig: stream %p", (void *)stream);
 
 	print_codec_cfg(codec_cfg);
 
@@ -268,7 +269,7 @@ static int lc3_reconfig(struct bt_bap_stream *stream, enum bt_audio_dir dir,
 static int lc3_qos(struct bt_bap_stream *stream, const struct bt_bap_qos_cfg *qos,
 		   struct bt_bap_ascs_rsp *rsp)
 {
-	printk("QoS: stream %p qos %p\n", stream, qos);
+	LOG_INF("QoS: stream %p qos %p", (void *)stream, (void *)qos);
 
 	print_qos(qos);
 
@@ -285,7 +286,7 @@ static int lc3_qos(struct bt_bap_stream *stream, const struct bt_bap_qos_cfg *qo
 static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t meta_len,
 		      struct bt_bap_ascs_rsp *rsp)
 {
-	printk("Enable: stream %p meta_len %zu\n", stream, meta_len);
+	LOG_INF("Enable: stream %p meta_len %zu", (void *)stream, meta_len);
 
 	int frame_duration_us;
 	int freq;
@@ -295,7 +296,7 @@ static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t
 	if (ret > 0) {
 		freq = bt_audio_codec_cfg_freq_to_freq_hz(ret);
 	} else {
-		printk("Error: Codec frequency not set, cannot start codec.");
+		LOG_INF("Error: Codec frequency not set, cannot start codec.");
 		*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_CONF_INVALID,
 						BT_BAP_ASCS_REASON_CODEC_DATA);
 		return ret;
@@ -305,7 +306,7 @@ static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t
 	if (ret > 0) {
 		frame_duration_us = bt_audio_codec_cfg_frame_dur_to_frame_dur_us(ret);
 	} else {
-		printk("Error: Frame duration not set, cannot start codec.");
+		LOG_INF("Error: Frame duration not set, cannot start codec.");
 		*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_CONF_INVALID,
 						BT_BAP_ASCS_REASON_CODEC_DATA);
 		return ret;
@@ -321,7 +322,7 @@ static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t
 						&lc3_decoder_mem[i]);
 
 		if (lc3_decoder[i] == NULL) {
-			printk("ERROR: Failed to setup LC3 encoder - wrong parameters?\n");
+			LOG_INF("ERROR: Failed to setup LC3 encoder - wrong parameters?");
 			*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_CONF_INVALID,
 						BT_BAP_ASCS_REASON_CODEC_DATA);
 			return -1;
@@ -334,7 +335,7 @@ static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t
 
 static int lc3_start(struct bt_bap_stream *stream, struct bt_bap_ascs_rsp *rsp)
 {
-	printk("Start: stream %p\n", stream);
+	LOG_INF("Start: stream %p", (void *)stream);
 
 	for (size_t i = 0U; i < configured_source_stream_count; i++) {
 		if (stream == &source_streams[i].stream) {
@@ -359,7 +360,7 @@ static bool data_func_cb(struct bt_data *data, void *user_data)
 	struct bt_bap_ascs_rsp *rsp = (struct bt_bap_ascs_rsp *)user_data;
 
 	if (!BT_AUDIO_METADATA_TYPE_IS_KNOWN(data->type)) {
-		printk("Invalid metadata type %u or length %u\n", data->type, data->data_len);
+		LOG_INF("Invalid metadata type %u or length %u", data->type, data->data_len);
 		*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_METADATA_REJECTED, data->type);
 
 		return -EINVAL;
@@ -371,28 +372,28 @@ static bool data_func_cb(struct bt_data *data, void *user_data)
 static int lc3_metadata(struct bt_bap_stream *stream, const uint8_t meta[], size_t meta_len,
 			struct bt_bap_ascs_rsp *rsp)
 {
-	printk("Metadata: stream %p meta_len %zu\n", stream, meta_len);
+	LOG_INF("Metadata: stream %p meta_len %zu", (void *)stream, meta_len);
 
 	return bt_audio_data_parse(meta, meta_len, data_func_cb, rsp);
 }
 
 static int lc3_disable(struct bt_bap_stream *stream, struct bt_bap_ascs_rsp *rsp)
 {
-	printk("Disable: stream %p\n", stream);
+	LOG_INF("Disable: stream %p", (void *)stream);
 
 	return 0;
 }
 
 static int lc3_stop(struct bt_bap_stream *stream, struct bt_bap_ascs_rsp *rsp)
 {
-	printk("Stop: stream %p\n", stream);
+	LOG_INF("Stop: stream %p", (void *)stream);
 
 	return 0;
 }
 
 static int lc3_release(struct bt_bap_stream *stream, struct bt_bap_ascs_rsp *rsp)
 {
-	printk("Release: stream %p\n", stream);
+	LOG_INF("Release: stream %p", (void *)stream);
 	return 0;
 }
 
@@ -422,16 +423,16 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 
 	for (int i = 0; i < 2; i++) {
 		if (lc3_decoder[i] == NULL) {
-			printk("LC3 decoder not setup, cannot decode data.\n");
+			LOG_INF("LC3 decoder not setup, cannot decode data.");
 			return;
 		}
 	}
 
 
 	if (!valid_data) {
-		printk("Bad packet: 0x%02X\n", info->flags);
+		LOG_INF("Bad packet: 0x%02X", info->flags);
 	}
-	//printk("RX stream %p len %u\n", stream, buf->len);
+	//LOG_INF("RX stream %p len %u", stream, buf->len);
 
 	for (int i = 0; i < frames_per_sdu; i++) {
 		for (int j = 0; j < 2; j++) {
@@ -439,9 +440,9 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 				lc3_decoder[j], valid_data ? net_buf_pull_mem(buf, octets_per_frame/2) : NULL,
 				octets_per_frame/2, LC3_PCM_FORMAT_S16, audio_buf+1, 2);
 			if (err == 1) {
-				printk("[%d]: Decoder performed PLC\n", i);
+				LOG_INF("[%d]: Decoder performed PLC", i);
 			} else if (err < 0) {
-				printk("[%d]: Decoder failed - wrong parameters?: %d\n", i, err);
+				LOG_INF("[%d]: Decoder failed - wrong parameters?: %d", i, err);
 			}
 		}
 	}
@@ -450,7 +451,7 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 
 static void stream_stopped(struct bt_bap_stream *stream, uint8_t reason)
 {
-	printk("Audio Stream %p stopped with reason 0x%02X\n", stream, reason);
+	LOG_INF("Audio Stream %p stopped with reason 0x%02X", (void *)stream, reason);
 
 	/* Stop send timer */
 	k_work_cancel_delayable(&audio_send_work);
@@ -458,7 +459,7 @@ static void stream_stopped(struct bt_bap_stream *stream, uint8_t reason)
 
 static void stream_started(struct bt_bap_stream *stream)
 {
-	printk("Audio Stream %p started\n", stream);
+	LOG_INF("Audio Stream %p started", (void *)stream);
 }
 
 static void stream_enabled_cb(struct bt_bap_stream *stream)
@@ -470,7 +471,7 @@ static void stream_enabled_cb(struct bt_bap_stream *stream)
 		const int err = bt_bap_stream_start(stream);
 
 		if (err != 0) {
-			printk("Failed to start stream %p: %d", stream, err);
+			LOG_INF("Failed to start stream %p: %d", (void *)stream, err);
 		}
 	}
 }
@@ -489,13 +490,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
 	if (err != 0) {
-		printk("Failed to connect to %s %u %s\n", addr, err, bt_hci_err_to_str(err));
+		LOG_INF("Failed to connect to %s %u %s", addr, err, bt_hci_err_to_str(err));
 
 		default_conn = NULL;
 		return;
 	}
 
-	printk("Connected: %s\n", addr);
+	LOG_INF("Connected: %s", addr);
 	default_conn = bt_conn_ref(conn);
 }
 
@@ -509,7 +510,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-	printk("Disconnected: %s, reason 0x%02x %s\n", addr, reason, bt_hci_err_to_str(reason));
+	LOG_INF("Disconnected: %s, reason 0x%02x %s", addr, reason, bt_hci_err_to_str(reason));
 
 	bt_conn_unref(default_conn);
 	default_conn = NULL;
@@ -542,7 +543,7 @@ static int set_location(void)
 						(BT_AUDIO_LOCATION_FRONT_LEFT |
 					    BT_AUDIO_LOCATION_FRONT_RIGHT));
 		if (err != 0) {
-			printk("Failed to set sink location (err %d)\n", err);
+			LOG_INF("Failed to set sink location (err %d)", err);
 			return err;
 		}
 	}
@@ -552,12 +553,12 @@ static int set_location(void)
 					   (BT_AUDIO_LOCATION_FRONT_LEFT |
 					    BT_AUDIO_LOCATION_FRONT_RIGHT));
 		if (err != 0) {
-			printk("Failed to set source location (err %d)\n", err);
+			LOG_INF("Failed to set source location (err %d)", err);
 			return err;
 		}
 	}
 
-	printk("Location successfully set\n");
+	LOG_INF("Location successfully set");
 
 	return 0;
 }
@@ -570,7 +571,7 @@ static int set_supported_contexts(void)
 		err = bt_pacs_set_supported_contexts(BT_AUDIO_DIR_SINK,
 						     AVAILABLE_SINK_CONTEXT);
 		if (err != 0) {
-			printk("Failed to set sink supported contexts (err %d)\n",
+			LOG_INF("Failed to set sink supported contexts (err %d)",
 			       err);
 
 			return err;
@@ -581,14 +582,14 @@ static int set_supported_contexts(void)
 		err = bt_pacs_set_supported_contexts(BT_AUDIO_DIR_SOURCE,
 						     AVAILABLE_SOURCE_CONTEXT);
 		if (err != 0) {
-			printk("Failed to set source supported contexts (err %d)\n",
+			LOG_INF("Failed to set source supported contexts (err %d)",
 			       err);
 
 			return err;
 		}
 	}
 
-	printk("Supported contexts successfully set\n");
+	LOG_INF("Supported contexts successfully set");
 
 	return 0;
 }
@@ -601,7 +602,7 @@ static int set_available_contexts(void)
 		err = bt_pacs_set_available_contexts(BT_AUDIO_DIR_SINK,
 						     AVAILABLE_SINK_CONTEXT);
 		if (err != 0) {
-			printk("Failed to set sink available contexts (err %d)\n", err);
+			LOG_INF("Failed to set sink available contexts (err %d)", err);
 			return err;
 		}
 	}
@@ -610,12 +611,12 @@ static int set_available_contexts(void)
 		err = bt_pacs_set_available_contexts(BT_AUDIO_DIR_SOURCE,
 						     AVAILABLE_SOURCE_CONTEXT);
 		if (err != 0) {
-			printk("Failed to set source available contexts (err %d)\n", err);
+			LOG_INF("Failed to set source available contexts (err %d)", err);
 			return err;
 		}
 	}
 
-	printk("Available contexts successfully set\n");
+	LOG_INF("Available contexts successfully set");
 	return 0;
 }
 
@@ -625,11 +626,11 @@ int main(void)
 
 	err = bt_enable(NULL);
 	if (err != 0) {
-		printk("Bluetooth init failed (err %d)\n", err);
+		LOG_INF("Bluetooth init failed (err %d)", err);
 		return 0;
 	}
 
-	printk("Bluetooth initialized\n");
+	LOG_INF("Bluetooth initialized");
 
 	bt_bap_unicast_server_register(&param);
 	bt_bap_unicast_server_register_cb(&unicast_server_cb);
@@ -664,13 +665,13 @@ int main(void)
 	/* Create a connectable advertising set */
 	err = bt_le_ext_adv_create(BT_BAP_ADV_PARAM_CONN_QUICK, NULL, &adv);
 	if (err) {
-		printk("Failed to create advertising set (err %d)\n", err);
+		LOG_INF("Failed to create advertising set (err %d)", err);
 		return 0;
 	}
 
 	err = bt_le_ext_adv_set_data(adv, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
-		printk("Failed to set advertising data (err %d)\n", err);
+		LOG_INF("Failed to set advertising data (err %d)", err);
 		return 0;
 	}
 
