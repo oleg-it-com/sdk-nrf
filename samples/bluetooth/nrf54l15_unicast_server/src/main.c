@@ -34,6 +34,7 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <stdint.h>
 #include <nrfx_i2s.h>
@@ -70,11 +71,13 @@ static nrfx_i2s_config_t cfg = {
 	.mck_setup = NRF_I2S_MCK_32MDIV2,
 };
 
-#define AVAILABLE_SINK_CONTEXT  (BT_AUDIO_CONTEXT_TYPE_UNSPECIFIED | \
-				 BT_AUDIO_CONTEXT_TYPE_CONVERSATIONAL | \
-				 BT_AUDIO_CONTEXT_TYPE_MEDIA | \
-				 BT_AUDIO_CONTEXT_TYPE_GAME | \
-				 BT_AUDIO_CONTEXT_TYPE_INSTRUCTIONAL)
+#include <zephyr/drivers/gpio.h>
+static const struct device *gpio;
+
+#define AVAILABLE_SINK_CONTEXT                                                                     \
+	(BT_AUDIO_CONTEXT_TYPE_UNSPECIFIED | BT_AUDIO_CONTEXT_TYPE_CONVERSATIONAL |                \
+	 BT_AUDIO_CONTEXT_TYPE_MEDIA | BT_AUDIO_CONTEXT_TYPE_GAME |                                \
+	 BT_AUDIO_CONTEXT_TYPE_INSTRUCTIONAL)
 
 #define AVAILABLE_SOURCE_CONTEXT BT_AUDIO_CONTEXT_TYPE_PROHIBITED
 
@@ -84,8 +87,7 @@ NET_BUF_POOL_FIXED_DEFINE(tx_pool, CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT,
 
 static const struct bt_audio_codec_cap lc3_codec_cap = BT_AUDIO_CODEC_CAP_LC3(
 	BT_AUDIO_CODEC_CAP_FREQ_48KHZ, BT_AUDIO_CODEC_CAP_DURATION_10,
-	BT_AUDIO_CODEC_CAP_CHAN_COUNT_SUPPORT(2), 80u, 240u, 1u,
-	AVAILABLE_SINK_CONTEXT);
+	BT_AUDIO_CODEC_CAP_CHAN_COUNT_SUPPORT(2), 80u, 240u, 1u, AVAILABLE_SINK_CONTEXT);
 
 static struct bt_conn *default_conn;
 static struct k_work_delayable audio_send_work;
@@ -98,20 +100,20 @@ static struct audio_source {
 } source_streams[CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT];
 static size_t configured_source_stream_count;
 
-
 #define I2S_SAMPLES_NUM 48 // samples per 1ms block
 // 20 buffers of size I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) = 10ms
 static uint16_t i2s_tx_buf_a[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
 static uint16_t i2s_tx_buf_b[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
 static uint16_t i2s_rx_buf_a[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
 static uint16_t i2s_rx_buf_b[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
-RING_BUF_DECLARE(i2s_tx_ring_buf, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t)*20);
+#define BUFFER_SPACE 20 // 20 buffers of size I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) = 10ms
+RING_BUF_DECLARE(i2s_tx_ring_buf, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) * BUFFER_SPACE);
 
 static const struct bt_bap_qos_cfg_pref qos_pref =
 	BT_BAP_QOS_CFG_PREF(true, BT_GAP_LE_PHY_2M, 10, 10, 10000, 40000, 10000, 40000);
 
 static uint8_t unicast_server_addata[] = {
-	BT_UUID_16_ENCODE(BT_UUID_ASCS_VAL), /* ASCS UUID */
+	BT_UUID_16_ENCODE(BT_UUID_ASCS_VAL),	/* ASCS UUID */
 	BT_AUDIO_UNICAST_ANNOUNCEMENT_TARGETED, /* Target Announcement */
 	BT_BYTES_LIST_LE16(AVAILABLE_SINK_CONTEXT),
 	BT_BYTES_LIST_LE16(AVAILABLE_SOURCE_CONTEXT),
@@ -129,11 +131,11 @@ static const struct bt_data ad[] = {
 static struct bt_le_ext_adv *adv;
 static struct k_work adv_work;
 
-#define MAX_SAMPLE_RATE         48000
-#define MAX_FRAME_DURATION_US   10000
-#define MAX_NUM_SAMPLES         ((MAX_FRAME_DURATION_US * MAX_SAMPLE_RATE) / USEC_PER_SEC)
+#define MAX_SAMPLE_RATE	      48000
+#define MAX_FRAME_DURATION_US 10000
+#define MAX_NUM_SAMPLES	      ((MAX_FRAME_DURATION_US * MAX_SAMPLE_RATE) / USEC_PER_SEC)
 
-static int16_t audio_buf[MAX_NUM_SAMPLES*2];
+static int16_t audio_buf[MAX_NUM_SAMPLES * 2];
 static lc3_decoder_t lc3_decoder[2];
 static lc3_decoder_mem_48k_t lc3_decoder_mem[2];
 static int frames_per_sdu;
@@ -158,15 +160,17 @@ static void i2s_comp_handler(nrfx_i2s_buffers_t const *released_bufs, uint32_t s
 
 	if (status == NRFX_I2S_STATUS_NEXT_BUFFERS_NEEDED) {
 		if ((uint16_t *)released_bufs->p_tx_buffer == i2s_tx_buf_a) {
-			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_a, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
-			if(ret != 192) {
+			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_a,
+					   I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
+			if (ret != 192) {
 				memset(i2s_tx_buf_a, 0, 192);
 			}
 			audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_a,
 					       (uint32_t *)i2s_rx_buf_a);
 		} else if ((uint16_t *)released_bufs->p_tx_buffer == i2s_tx_buf_b) {
-			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_b, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
-			if(ret != 192) {
+			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_b,
+					   I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
+			if (ret != 192) {
 				memset(i2s_tx_buf_b, 0, 192);
 			}
 			audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_b,
@@ -200,7 +204,8 @@ void audio_i2s_init(void)
 		return;
 	}
 
-	IRQ_CONNECT(DT_IRQN(I2S_NL), DT_IRQ(I2S_NL, priority), nrfx_isr, nrfx_i2s_20_irq_handler, 0);
+	IRQ_CONNECT(DT_IRQN(I2S_NL), DT_IRQ(I2S_NL, priority), nrfx_isr, nrfx_i2s_20_irq_handler,
+		    0);
 	irq_enable(DT_IRQN(I2S_NL));
 
 	ret = nrfx_i2s_init(&i2s_inst, &cfg, i2s_comp_handler);
@@ -248,7 +253,6 @@ static int clocks_start(void)
 	return 0;
 }
 
-
 void dac_i2c_write(const struct i2c_dt_spec *dev_i2c, uint8_t reg, uint8_t value)
 {
 	int ret;
@@ -258,8 +262,8 @@ void dac_i2c_write(const struct i2c_dt_spec *dev_i2c, uint8_t reg, uint8_t value
 	if (ret != 0) {
 		printf("Failed to write to I2C device address %x at reg. %x\n", dev_i2c->addr, reg);
 	} else {
-		//printf("I2C device address %x at reg. %x written successfully\n", dev_i2c->addr,
-		//       reg);
+		// printf("I2C device address %x at reg. %x written successfully\n", dev_i2c->addr,
+		//        reg);
 	}
 }
 
@@ -320,7 +324,6 @@ void tlv320_setup(void)
 	dac_i2c_write(&dev_i2c, 0x00, 0x00);
 }
 
-
 void print_hex(const uint8_t *ptr, size_t len)
 {
 	while (len-- != 0) {
@@ -341,7 +344,7 @@ static bool print_cb(struct bt_data *data, void *user_data)
 static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 {
 	LOG_INF("codec_cfg 0x%02x cid 0x%04x vid 0x%04x count %u", codec_cfg->id, codec_cfg->cid,
-	       codec_cfg->vid, codec_cfg->data_len);
+		codec_cfg->vid, codec_cfg->data_len);
 
 	if (codec_cfg->id == BT_HCI_CODING_FORMAT_LC3) {
 		enum bt_audio_location chan_allocation;
@@ -359,7 +362,7 @@ static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 		ret = bt_audio_codec_cfg_get_frame_dur(codec_cfg);
 		if (ret > 0) {
 			LOG_INF("  Frame Duration: %d us",
-			       bt_audio_codec_cfg_frame_dur_to_frame_dur_us(ret));
+				bt_audio_codec_cfg_frame_dur_to_frame_dur_us(ret));
 		}
 
 		ret = bt_audio_codec_cfg_get_chan_allocation(codec_cfg, &chan_allocation, false);
@@ -368,9 +371,9 @@ static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 		}
 
 		LOG_INF("  Octets per frame: %d (negative means value not pressent)",
-		       bt_audio_codec_cfg_get_octets_per_frame(codec_cfg));
+			bt_audio_codec_cfg_get_octets_per_frame(codec_cfg));
 		LOG_INF("  Frames per SDU: %d",
-		       bt_audio_codec_cfg_get_frame_blocks_per_sdu(codec_cfg, true));
+			bt_audio_codec_cfg_get_frame_blocks_per_sdu(codec_cfg, true));
 	} else {
 		print_hex(codec_cfg->data, codec_cfg->data_len);
 	}
@@ -381,9 +384,8 @@ static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 static void print_qos(const struct bt_bap_qos_cfg *qos)
 {
 	LOG_INF("QoS: interval %u framing 0x%02x phy 0x%02x sdu %u "
-	       "rtn %u latency %u pd %u",
-	       qos->interval, qos->framing, qos->phy, qos->sdu,
-	       qos->rtn, qos->latency, qos->pd);
+		"rtn %u latency %u pd %u",
+		qos->interval, qos->framing, qos->phy, qos->sdu, qos->rtn, qos->latency, qos->pd);
 }
 
 static enum bt_audio_dir stream_dir(const struct bt_bap_stream *stream)
@@ -400,7 +402,7 @@ static enum bt_audio_dir stream_dir(const struct bt_bap_stream *stream)
 		}
 	}
 
-	__ASSERT(false, "Invalid stream %p", (void *) stream);
+	__ASSERT(false, "Invalid stream %p", (void *)stream);
 	return 0;
 }
 
@@ -431,7 +433,7 @@ static int lc3_config(struct bt_conn *conn, const struct bt_bap_ep *ep, enum bt_
 		      const struct bt_audio_codec_cfg *codec_cfg, struct bt_bap_stream **stream,
 		      struct bt_bap_qos_cfg_pref *const pref, struct bt_bap_ascs_rsp *rsp)
 {
-	LOG_INF("ASE Codec Config: conn %p ep %p dir %u", (void *) conn, (void *) ep, dir);
+	LOG_INF("ASE Codec Config: conn %p ep %p dir %u", (void *)conn, (void *)ep, dir);
 
 	print_codec_cfg(codec_cfg);
 
@@ -443,7 +445,7 @@ static int lc3_config(struct bt_conn *conn, const struct bt_bap_ep *ep, enum bt_
 		return -ENOMEM;
 	}
 
-	LOG_INF("ASE Codec Config stream %p", (void *) *stream);
+	LOG_INF("ASE Codec Config stream %p", (void *)*stream);
 
 	if (dir == BT_AUDIO_DIR_SOURCE) {
 		configured_source_stream_count++;
@@ -453,7 +455,7 @@ static int lc3_config(struct bt_conn *conn, const struct bt_bap_ep *ep, enum bt_
 
 	/* Nothing to free as static memory is used */
 	for (int i = 0; i < 2; i++) {
-			lc3_decoder[i] = NULL;
+		lc3_decoder[i] = NULL;
 	}
 
 	return 0;
@@ -468,7 +470,7 @@ static int lc3_reconfig(struct bt_bap_stream *stream, enum bt_audio_dir dir,
 	print_codec_cfg(codec_cfg);
 
 	/* Nothing to free as static memory is used */
-	for(int i = 0; i < 2; i++) {
+	for (int i = 0; i < 2; i++) {
 		lc3_decoder[i] = NULL;
 	}
 
@@ -510,7 +512,7 @@ static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t
 	} else {
 		LOG_INF("Error: Codec frequency not set, cannot start codec.");
 		*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_CONF_INVALID,
-						BT_BAP_ASCS_REASON_CODEC_DATA);
+				       BT_BAP_ASCS_REASON_CODEC_DATA);
 		return ret;
 	}
 
@@ -520,27 +522,23 @@ static int lc3_enable(struct bt_bap_stream *stream, const uint8_t meta[], size_t
 	} else {
 		LOG_INF("Error: Frame duration not set, cannot start codec.");
 		*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_CONF_INVALID,
-						BT_BAP_ASCS_REASON_CODEC_DATA);
+				       BT_BAP_ASCS_REASON_CODEC_DATA);
 		return ret;
 	}
 
-	frames_per_sdu =
-		bt_audio_codec_cfg_get_frame_blocks_per_sdu(stream->codec_cfg, true);
+	frames_per_sdu = bt_audio_codec_cfg_get_frame_blocks_per_sdu(stream->codec_cfg, true);
 
-	for (int i = 0; i <2; i++){
-		lc3_decoder[i] = lc3_setup_decoder(frame_duration_us,
-						freq,
-						0, /* No resampling */
-						&lc3_decoder_mem[i]);
+	for (int i = 0; i < 2; i++) {
+		lc3_decoder[i] = lc3_setup_decoder(frame_duration_us, freq, 0, /* No resampling */
+						   &lc3_decoder_mem[i]);
 
 		if (lc3_decoder[i] == NULL) {
 			LOG_INF("ERROR: Failed to setup LC3 encoder - wrong parameters?");
 			*rsp = BT_BAP_ASCS_RSP(BT_BAP_ASCS_RSP_CODE_CONF_INVALID,
-						BT_BAP_ASCS_REASON_CODEC_DATA);
+					       BT_BAP_ASCS_REASON_CODEC_DATA);
 			return -1;
 		}
 	}
-
 
 	return 0;
 }
@@ -557,8 +555,7 @@ static int lc3_start(struct bt_bap_stream *stream, struct bt_bap_ascs_rsp *rsp)
 		}
 	}
 
-	if (configured_source_stream_count > 0 &&
-	    !k_work_delayable_is_pending(&audio_send_work)) {
+	if (configured_source_stream_count > 0 && !k_work_delayable_is_pending(&audio_send_work)) {
 
 		/* Start send timer */
 		k_work_schedule(&audio_send_work, K_MSEC(0));
@@ -609,10 +606,8 @@ static int lc3_release(struct bt_bap_stream *stream, struct bt_bap_ascs_rsp *rsp
 	return 0;
 }
 
-static struct bt_bap_unicast_server_register_param param = {
-	CONFIG_BT_ASCS_MAX_ASE_SNK_COUNT,
-	CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT
-};
+static struct bt_bap_unicast_server_register_param param = {CONFIG_BT_ASCS_MAX_ASE_SNK_COUNT,
+							    CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT};
 
 static const struct bt_bap_unicast_server_cb unicast_server_cb = {
 	.config = lc3_config,
@@ -626,8 +621,7 @@ static const struct bt_bap_unicast_server_cb unicast_server_cb = {
 	.release = lc3_release,
 };
 
-static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
-				  const struct bt_iso_recv_info *info,
+static void stream_recv_lc3_codec(struct bt_bap_stream *stream, const struct bt_iso_recv_info *info,
 				  struct net_buf *buf)
 {
 	bool valid_data = (info->flags & BT_ISO_FLAGS_VALID) != 0;
@@ -649,17 +643,16 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 		LOG_INF("Bad packet: 0x%02X", info->flags);
 	}
 
-
-	int16_t audio_buf_test[2*480];
-	//LOG_INF("RX stream %p len %u", stream, buf->len);
+	int16_t audio_buf_test[2 * 480];
+	// LOG_INF("RX stream %p len %u", stream, buf->len);
 	uint16_t buf_size;
 	static uint16_t prev_buf_size = 0;
-
 
 	buf_size = ring_buf_space_get(&i2s_tx_ring_buf);
 	if (buf_size != prev_buf_size) {
 		prev_buf_size = buf_size;
-		LOG_INF("I2S TX ring buffer space: %d bytes", buf_size);
+		//LOG_INF("I2S TX ring buffer space: %d bytes", buf_size);
+		LOG_INF("%d", buf_size * 100 / (I2S_SAMPLES_NUM * 2 * sizeof(uint16_t)*BUFFER_SPACE));
 	}
 
 	for (int i = 0; i < frames_per_sdu; i++) {
@@ -667,7 +660,7 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 			const int err = lc3_decode(
 				lc3_decoder[j],
 				valid_data ? net_buf_pull_mem(buf, octets_per_frame / 2) : NULL,
-				octets_per_frame / 2, LC3_PCM_FORMAT_S16, audio_buf_test+j, 2);
+				octets_per_frame / 2, LC3_PCM_FORMAT_S16, audio_buf_test + j, 2);
 			if (err == 1) {
 				LOG_DBG("[%d]: Decoder performed PLC", i);
 			} else if (err < 0) {
@@ -677,7 +670,6 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 	}
 	ring_buf_put(&i2s_tx_ring_buf, (uint8_t *)audio_buf_test, 480 * 2 * sizeof(int16_t));
 }
-
 
 static void stream_stopped(struct bt_bap_stream *stream, uint8_t reason)
 {
@@ -715,12 +707,12 @@ static struct bt_bap_stream_ops stream_ops = {
 
 static void advertising_process(struct k_work *work)
 {
-       int err;
-       err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
-       if (err) {
-               LOG_INF("Failed to start advertising set (err %d)", err);
-       }
-       LOG_INF("Advertising successfully started");
+	int err;
+	err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
+	if (err) {
+		LOG_INF("Failed to start advertising set (err %d)", err);
+	}
+	LOG_INF("Advertising successfully started");
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -779,9 +771,8 @@ static int set_location(void)
 	int err;
 
 	if (IS_ENABLED(CONFIG_BT_PAC_SNK_LOC)) {
-		err = bt_pacs_set_location(BT_AUDIO_DIR_SINK,
-						(BT_AUDIO_LOCATION_FRONT_LEFT |
-					    BT_AUDIO_LOCATION_FRONT_RIGHT));
+		err = bt_pacs_set_location(BT_AUDIO_DIR_SINK, (BT_AUDIO_LOCATION_FRONT_LEFT |
+							       BT_AUDIO_LOCATION_FRONT_RIGHT));
 		if (err != 0) {
 			LOG_INF("Failed to set sink location (err %d)", err);
 			return err;
@@ -789,9 +780,8 @@ static int set_location(void)
 	}
 
 	if (IS_ENABLED(CONFIG_BT_PAC_SRC_LOC)) {
-		err = bt_pacs_set_location(BT_AUDIO_DIR_SOURCE,
-					   (BT_AUDIO_LOCATION_FRONT_LEFT |
-					    BT_AUDIO_LOCATION_FRONT_RIGHT));
+		err = bt_pacs_set_location(BT_AUDIO_DIR_SOURCE, (BT_AUDIO_LOCATION_FRONT_LEFT |
+								 BT_AUDIO_LOCATION_FRONT_RIGHT));
 		if (err != 0) {
 			LOG_INF("Failed to set source location (err %d)", err);
 			return err;
@@ -808,22 +798,18 @@ static int set_supported_contexts(void)
 	int err;
 
 	if (IS_ENABLED(CONFIG_BT_PAC_SNK)) {
-		err = bt_pacs_set_supported_contexts(BT_AUDIO_DIR_SINK,
-						     AVAILABLE_SINK_CONTEXT);
+		err = bt_pacs_set_supported_contexts(BT_AUDIO_DIR_SINK, AVAILABLE_SINK_CONTEXT);
 		if (err != 0) {
-			LOG_INF("Failed to set sink supported contexts (err %d)",
-			       err);
+			LOG_INF("Failed to set sink supported contexts (err %d)", err);
 
 			return err;
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_PAC_SRC)) {
-		err = bt_pacs_set_supported_contexts(BT_AUDIO_DIR_SOURCE,
-						     AVAILABLE_SOURCE_CONTEXT);
+		err = bt_pacs_set_supported_contexts(BT_AUDIO_DIR_SOURCE, AVAILABLE_SOURCE_CONTEXT);
 		if (err != 0) {
-			LOG_INF("Failed to set source supported contexts (err %d)",
-			       err);
+			LOG_INF("Failed to set source supported contexts (err %d)", err);
 
 			return err;
 		}
@@ -839,8 +825,7 @@ static int set_available_contexts(void)
 	int err;
 
 	if (IS_ENABLED(CONFIG_BT_PAC_SNK)) {
-		err = bt_pacs_set_available_contexts(BT_AUDIO_DIR_SINK,
-						     AVAILABLE_SINK_CONTEXT);
+		err = bt_pacs_set_available_contexts(BT_AUDIO_DIR_SINK, AVAILABLE_SINK_CONTEXT);
 		if (err != 0) {
 			LOG_INF("Failed to set sink available contexts (err %d)", err);
 			return err;
@@ -848,8 +833,7 @@ static int set_available_contexts(void)
 	}
 
 	if (IS_ENABLED(CONFIG_BT_PAC_SRC)) {
-		err = bt_pacs_set_available_contexts(BT_AUDIO_DIR_SOURCE,
-						     AVAILABLE_SOURCE_CONTEXT);
+		err = bt_pacs_set_available_contexts(BT_AUDIO_DIR_SOURCE, AVAILABLE_SOURCE_CONTEXT);
 		if (err != 0) {
 			LOG_INF("Failed to set source available contexts (err %d)", err);
 			return err;
@@ -864,11 +848,14 @@ int main(void)
 {
 	int err;
 
+	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	gpio_pin_configure_dt(&rst, GPIO_OUTPUT);
+	gpio_pin_configure(gpio, 4, GPIO_INPUT|GPIO_PULL_UP);
+
 	clocks_start();
 	gpio_pin_set_dt(&rst, 0); // Reset high
-	k_sleep(K_MSEC(1000));    // Wait for reset to take effect
+	k_sleep(K_MSEC(1000));	  // Wait for reset to take effect
 	gpio_pin_set_dt(&rst, 1); // Reset high
 	tlv320_setup();
 
@@ -882,7 +869,22 @@ int main(void)
 		LOG_INF("Bluetooth init failed (err %d)", err);
 		return 0;
 	}
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		settings_load();
+	}
 
+	err = gpio_pin_get(gpio, 4);
+	if (err == 0) {
+		if (IS_ENABLED(CONFIG_SETTINGS)) {
+			LOG_WRN("Clearing all bonds");
+
+			err = bt_unpair(BT_ID_DEFAULT, NULL);
+			if (err) {
+				LOG_ERR("Failed to clear bonding: %d", err);
+				return err;
+			}
+		}
+	}
 	LOG_INF("Bluetooth initialized");
 
 	bt_bap_unicast_server_register(&param);
@@ -896,8 +898,7 @@ int main(void)
 	}
 
 	for (size_t i = 0; i < ARRAY_SIZE(source_streams); i++) {
-		bt_bap_stream_cb_register(&source_streams[i].stream,
-					    &stream_ops);
+		bt_bap_stream_cb_register(&source_streams[i].stream, &stream_ops);
 	}
 
 	err = set_location();
@@ -928,8 +929,8 @@ int main(void)
 		return 0;
 	}
 
-    k_work_init(&adv_work, advertising_process);
-    k_work_submit(&adv_work);
+	k_work_init(&adv_work, advertising_process);
+	k_work_submit(&adv_work);
 
 	while (true) {
 		k_sleep(K_SECONDS(1));
