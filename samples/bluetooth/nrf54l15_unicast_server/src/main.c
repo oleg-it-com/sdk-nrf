@@ -159,14 +159,14 @@ static void i2s_comp_handler(nrfx_i2s_buffers_t const *released_bufs, uint32_t s
 	if (status == NRFX_I2S_STATUS_NEXT_BUFFERS_NEEDED) {
 		if ((uint16_t *)released_bufs->p_tx_buffer == i2s_tx_buf_a) {
 			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_a, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
-			if(ret < 192) {
+			if(ret != 192) {
 				memset(i2s_tx_buf_a, 0, 192);
 			}
 			audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_a,
 					       (uint32_t *)i2s_rx_buf_a);
 		} else if ((uint16_t *)released_bufs->p_tx_buffer == i2s_tx_buf_b) {
 			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_b, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
-			if(ret < 192) {
+			if(ret != 192) {
 				memset(i2s_tx_buf_b, 0, 192);
 			}
 			audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_b,
@@ -630,7 +630,7 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 				  const struct bt_iso_recv_info *info,
 				  struct net_buf *buf)
 {
-	const bool valid_data = (info->flags & BT_ISO_FLAGS_VALID) != 0;
+	bool valid_data = (info->flags & BT_ISO_FLAGS_VALID) != 0;
 	const int octets_per_frame = buf->len / frames_per_sdu;
 
 	for (int i = 0; i < 2; i++) {
@@ -640,10 +640,16 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 		}
 	}
 
+	if (buf->len == 0) {
+		LOG_INF("Received empty buffer");
+		valid_data = false;
+	}
 
 	if (!valid_data) {
 		LOG_INF("Bad packet: 0x%02X", info->flags);
 	}
+
+
 	int16_t audio_buf_test[2*480];
 	//LOG_INF("RX stream %p len %u", stream, buf->len);
 	uint16_t buf_size;
@@ -663,7 +669,7 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 				valid_data ? net_buf_pull_mem(buf, octets_per_frame / 2) : NULL,
 				octets_per_frame / 2, LC3_PCM_FORMAT_S16, audio_buf_test+j, 2);
 			if (err == 1) {
-				LOG_INF("[%d]: Decoder performed PLC", i);
+				LOG_DBG("[%d]: Decoder performed PLC", i);
 			} else if (err < 0) {
 				LOG_INF("[%d]: Decoder failed - wrong parameters?: %d", i, err);
 			}
