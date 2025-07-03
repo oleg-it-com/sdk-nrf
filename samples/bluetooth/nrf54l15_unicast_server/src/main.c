@@ -31,8 +31,44 @@
 #include <zephyr/sys/util_macro.h>
 #include <zephyr/sys_clock.h>
 #include <zephyr/types.h>
+#include <zephyr/sys/ring_buffer.h>
+#include <zephyr/drivers/pinctrl.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
+#include <stdint.h>
+#include <nrfx_i2s.h>
+#include <nrfx_clock.h>
+#include <pcm_mix.h>
+#include "lc3.h"
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
+
+#include "nrf54l15.h"
+#if defined(NRF54L15_XXAA)
+#include <hal/nrf_clock.h>
+#endif /* defined(NRF54L15_XXAA) */
+#include <zephyr/drivers/i2c.h>
+#define I2C_NODE DT_NODELABEL(tlv320)
+
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static const struct gpio_dt_spec rst = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
+
+#define I2S_NL DT_NODELABEL(i2s20)
+PINCTRL_DT_DEFINE(I2S_NL);
+static nrfx_i2s_t i2s_inst = NRFX_I2S_INSTANCE(20);
+static nrfx_i2s_config_t cfg = {
+	/* Pins are configured by pinctrl. */
+	.skip_gpio_cfg = true,
+	.skip_psel_cfg = true,
+	.irq_priority = DT_IRQ(I2S_NL, priority),
+	.mode = NRF_I2S_MODE_SLAVE,
+	.format = NRF_I2S_FORMAT_I2S,
+	.alignment = NRF_I2S_ALIGN_LEFT,
+	.ratio = NRF_I2S_RATIO_64X,
+	.sample_width = NRF_I2S_SWIDTH_16BIT,
+	.channels = NRF_I2S_CHANNELS_STEREO,
+	.mck_setup = NRF_I2S_MCK_32MDIV2,
+};
 
 #define AVAILABLE_SINK_CONTEXT  (BT_AUDIO_CONTEXT_TYPE_UNSPECIFIED | \
 				 BT_AUDIO_CONTEXT_TYPE_CONVERSATIONAL | \
@@ -47,7 +83,7 @@ NET_BUF_POOL_FIXED_DEFINE(tx_pool, CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT,
 			  CONFIG_BT_CONN_TX_USER_DATA_SIZE, NULL);
 
 static const struct bt_audio_codec_cap lc3_codec_cap = BT_AUDIO_CODEC_CAP_LC3(
-	BT_AUDIO_CODEC_CAP_FREQ_ANY, BT_AUDIO_CODEC_CAP_DURATION_10,
+	BT_AUDIO_CODEC_CAP_FREQ_48KHZ, BT_AUDIO_CODEC_CAP_DURATION_10,
 	BT_AUDIO_CODEC_CAP_CHAN_COUNT_SUPPORT(2), 80u, 240u, 1u,
 	AVAILABLE_SINK_CONTEXT);
 
@@ -62,8 +98,17 @@ static struct audio_source {
 } source_streams[CONFIG_BT_ASCS_MAX_ASE_SRC_COUNT];
 static size_t configured_source_stream_count;
 
+
+#define I2S_SAMPLES_NUM 48 // samples per 1ms block
+// 20 buffers of size I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) = 10ms
+static uint16_t i2s_tx_buf_a[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
+static uint16_t i2s_tx_buf_b[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
+static uint16_t i2s_rx_buf_a[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
+static uint16_t i2s_rx_buf_b[I2S_SAMPLES_NUM * 2] = {0}; // 2 channels, 16 bits each
+RING_BUF_DECLARE(i2s_tx_ring_buf, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t)*20);
+
 static const struct bt_bap_qos_cfg_pref qos_pref =
-	BT_BAP_QOS_CFG_PREF(true, BT_GAP_LE_PHY_2M, 0x02, 10, 10000, 40000, 10000, 40000);
+	BT_BAP_QOS_CFG_PREF(true, BT_GAP_LE_PHY_2M, 10, 10, 10000, 40000, 10000, 40000);
 
 static uint8_t unicast_server_addata[] = {
 	BT_UUID_16_ENCODE(BT_UUID_ASCS_VAL), /* ASCS UUID */
@@ -81,23 +126,8 @@ static const struct bt_data ad[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
 
-#define AUDIO_DATA_TIMEOUT_US 1000000UL /* Send data every 1 second */
-#define SDU_INTERVAL_US       10000UL   /* 10 ms SDU interval */
-
 static struct bt_le_ext_adv *adv;
 static struct k_work adv_work;
-
-static void advertising_process(struct k_work *work)
-{
-       int err;
-       err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
-       if (err) {
-               LOG_INF("Failed to start advertising set (err %d)", err);
-       }
-       LOG_INF("Advertising successfully started");
-}
-
-#include "lc3.h"
 
 #define MAX_SAMPLE_RATE         48000
 #define MAX_FRAME_DURATION_US   10000
@@ -107,6 +137,188 @@ static int16_t audio_buf[MAX_NUM_SAMPLES*2];
 static lc3_decoder_t lc3_decoder[2];
 static lc3_decoder_mem_48k_t lc3_decoder_mem[2];
 static int frames_per_sdu;
+
+void audio_i2s_set_next_buf(const uint8_t *tx_buf, uint32_t *rx_buf)
+{
+	const nrfx_i2s_buffers_t i2s_buf = {.p_rx_buffer = rx_buf,
+					    .p_tx_buffer = (uint32_t *)tx_buf,
+					    .buffer_size = I2S_SAMPLES_NUM};
+
+	nrfx_err_t ret;
+
+	ret = nrfx_i2s_next_buffers_set(&i2s_inst, &i2s_buf);
+	if (ret != NRFX_SUCCESS) {
+		printf("Failed to set next buffers: %x\n", ret);
+	}
+}
+
+static void i2s_comp_handler(nrfx_i2s_buffers_t const *released_bufs, uint32_t status)
+{
+	int ret;
+
+	if (status == NRFX_I2S_STATUS_NEXT_BUFFERS_NEEDED) {
+		if ((uint16_t *)released_bufs->p_tx_buffer == i2s_tx_buf_a) {
+			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_a, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
+			if(ret < 192) {
+				memset(i2s_tx_buf_a, 0, 192);
+			}
+			audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_a,
+					       (uint32_t *)i2s_rx_buf_a);
+		} else if ((uint16_t *)released_bufs->p_tx_buffer == i2s_tx_buf_b) {
+			ret = ring_buf_get(&i2s_tx_ring_buf, (uint8_t *)i2s_tx_buf_b, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t));
+			if(ret < 192) {
+				memset(i2s_tx_buf_b, 0, 192);
+			}
+			audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_b,
+					       (uint32_t *)i2s_rx_buf_b);
+		}
+	}
+}
+
+void audio_i2s_start(const uint8_t *tx_buf, uint32_t *rx_buf)
+{
+	const nrfx_i2s_buffers_t i2s_buf = {.p_rx_buffer = rx_buf,
+					    .p_tx_buffer = (uint32_t *)tx_buf,
+					    .buffer_size = I2S_SAMPLES_NUM};
+
+	int ret;
+
+	/* Buffer size in 32-bit words */
+	ret = nrfx_i2s_start(&i2s_inst, &i2s_buf, 0);
+	if (ret != NRFX_SUCCESS) {
+		printf("Failed to start I2S: %d\n", ret);
+	}
+}
+
+void audio_i2s_init(void)
+{
+	int ret;
+
+	ret = pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(I2S_NL), PINCTRL_STATE_DEFAULT);
+	if (ret != 0) {
+		printf("Failed to apply pinctrl state: %d\n", ret);
+		return;
+	}
+
+	IRQ_CONNECT(DT_IRQN(I2S_NL), DT_IRQ(I2S_NL, priority), nrfx_isr, nrfx_i2s_20_irq_handler, 0);
+	irq_enable(DT_IRQN(I2S_NL));
+
+	ret = nrfx_i2s_init(&i2s_inst, &cfg, i2s_comp_handler);
+	if (ret != NRFX_SUCCESS) {
+		printf("Failed to initialize I2S: %x\n", ret);
+		return;
+	}
+}
+
+static int clocks_start(void)
+{
+	int err;
+	int res;
+	struct onoff_manager *clk_mgr;
+	struct onoff_client clk_cli;
+
+	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	if (!clk_mgr) {
+		printf("Unable to get the Clock manager\n");
+		return -ENXIO;
+	}
+
+	sys_notify_init_spinwait(&clk_cli.notify);
+
+	err = onoff_request(clk_mgr, &clk_cli);
+	if (err < 0) {
+		printf("Clock request failed: %d\n", err);
+		return err;
+	}
+
+	do {
+		err = sys_notify_fetch_result(&clk_cli.notify, &res);
+		if (!err && res) {
+			printf("Clock could not be started: %d\n", res);
+			return res;
+		}
+	} while (err);
+
+#if defined(NRF54L15_XXAA)
+	/* MLTPAN-20 */
+	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
+#endif /* defined(NRF54L15_XXAA) */
+
+	printf("HF clock started\n");
+	return 0;
+}
+
+
+void dac_i2c_write(const struct i2c_dt_spec *dev_i2c, uint8_t reg, uint8_t value)
+{
+	int ret;
+	uint8_t config[2] = {reg, value};
+
+	ret = i2c_write_dt(dev_i2c, config, sizeof(config));
+	if (ret != 0) {
+		printf("Failed to write to I2C device address %x at reg. %x\n", dev_i2c->addr, reg);
+	} else {
+		//printf("I2C device address %x at reg. %x written successfully\n", dev_i2c->addr,
+		//       reg);
+	}
+}
+
+void tlv320_setup(void)
+{
+	static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(I2C_NODE);
+
+	if (!device_is_ready(dev_i2c.bus)) {
+		printf("I2C bus %s is not ready!\n", dev_i2c.bus->name);
+		return;
+	} else {
+		printf("I2C bus %s is ready!\n", dev_i2c.bus->name);
+	}
+
+	dac_i2c_write(&dev_i2c, 0x00, 0x00);
+
+	dac_i2c_write(&dev_i2c, 0x01, 0x01);
+	k_sleep(K_MSEC(10));
+
+	dac_i2c_write(&dev_i2c, 0x04, 0x03 | (0b11 << 0));
+	dac_i2c_write(&dev_i2c, 0x05, (0b001 << 4) | (0b0001 << 0));
+	dac_i2c_write(&dev_i2c, 0x06, 0x05);
+	dac_i2c_write(&dev_i2c, 0x07, 0x0E);
+	dac_i2c_write(&dev_i2c, 0x08, 0xB0);
+
+	dac_i2c_write(&dev_i2c, 0x05, (1 << 7) | (0b001 << 4) | (0b0001 << 0));
+	k_sleep(K_MSEC(15));
+
+	dac_i2c_write(&dev_i2c, 0x0B, 0x87);
+	dac_i2c_write(&dev_i2c, 0x0C, 0x82);
+	dac_i2c_write(&dev_i2c, 0x0D, 0x00);
+	dac_i2c_write(&dev_i2c, 0x0E, 0x80);
+
+	dac_i2c_write(&dev_i2c, 0x1B, 0x0C);
+	dac_i2c_write(&dev_i2c, 0x1E, 0x84);
+	dac_i2c_write(&dev_i2c, 0x1D, (0b01 << 0));
+	dac_i2c_write(&dev_i2c, 0x3C, 0x01);
+	dac_i2c_write(&dev_i2c, 0x74, 0x00);
+
+	dac_i2c_write(&dev_i2c, 0x00, 0x01);
+	dac_i2c_write(&dev_i2c, 0x1F, (0b00 << 3));
+	dac_i2c_write(&dev_i2c, 0x21, (0b0111 << 3) | (0b11 << 1));
+	dac_i2c_write(&dev_i2c, 0x23, 0x44);
+	dac_i2c_write(&dev_i2c, 0x24, 0x80);
+	dac_i2c_write(&dev_i2c, 0x25, 0x80);
+	dac_i2c_write(&dev_i2c, 0x28, 0x06);
+	dac_i2c_write(&dev_i2c, 0x29, 0x06);
+	dac_i2c_write(&dev_i2c, 0x1F, 0xC0 | (0b00 << 3));
+	// dac_i2c_write(&dev_i2c, 0x20, 0x80);
+
+	k_sleep(K_MSEC(300));
+
+	dac_i2c_write(&dev_i2c, 0x00, 0x00);
+	dac_i2c_write(&dev_i2c, 0x3F, 0xD4);
+	dac_i2c_write(&dev_i2c, 0x41, -60);
+	dac_i2c_write(&dev_i2c, 0x42, -60);
+	dac_i2c_write(&dev_i2c, 0x40, 0x00);
+	dac_i2c_write(&dev_i2c, 0x00, 0x00);
+}
 
 
 void print_hex(const uint8_t *ptr, size_t len)
@@ -432,13 +644,24 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 	if (!valid_data) {
 		LOG_INF("Bad packet: 0x%02X", info->flags);
 	}
+	int16_t audio_buf_test[2*480];
 	//LOG_INF("RX stream %p len %u", stream, buf->len);
+	uint16_t buf_size;
+	static uint16_t prev_buf_size = 0;
+
+
+	buf_size = ring_buf_space_get(&i2s_tx_ring_buf);
+	if (buf_size != prev_buf_size) {
+		prev_buf_size = buf_size;
+		LOG_INF("I2S TX ring buffer space: %d bytes", buf_size);
+	}
 
 	for (int i = 0; i < frames_per_sdu; i++) {
 		for (int j = 0; j < 2; j++) {
 			const int err = lc3_decode(
-				lc3_decoder[j], valid_data ? net_buf_pull_mem(buf, octets_per_frame/2) : NULL,
-				octets_per_frame/2, LC3_PCM_FORMAT_S16, audio_buf+1, 2);
+				lc3_decoder[j],
+				valid_data ? net_buf_pull_mem(buf, octets_per_frame / 2) : NULL,
+				octets_per_frame / 2, LC3_PCM_FORMAT_S16, audio_buf_test+j, 2);
 			if (err == 1) {
 				LOG_INF("[%d]: Decoder performed PLC", i);
 			} else if (err < 0) {
@@ -446,6 +669,7 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream,
 			}
 		}
 	}
+	ring_buf_put(&i2s_tx_ring_buf, (uint8_t *)audio_buf_test, 480 * 2 * sizeof(int16_t));
 }
 
 
@@ -482,6 +706,16 @@ static struct bt_bap_stream_ops stream_ops = {
 	.started = stream_started,
 	.enabled = stream_enabled_cb,
 };
+
+static void advertising_process(struct k_work *work)
+{
+       int err;
+       err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
+       if (err) {
+               LOG_INF("Failed to start advertising set (err %d)", err);
+       }
+       LOG_INF("Advertising successfully started");
+}
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -623,6 +857,19 @@ static int set_available_contexts(void)
 int main(void)
 {
 	int err;
+
+	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
+	gpio_pin_configure_dt(&rst, GPIO_OUTPUT);
+	clocks_start();
+	gpio_pin_set_dt(&rst, 0); // Reset high
+	k_sleep(K_MSEC(1000));    // Wait for reset to take effect
+	gpio_pin_set_dt(&rst, 1); // Reset high
+	tlv320_setup();
+
+	audio_i2s_init();
+
+	audio_i2s_start((uint8_t *)i2s_tx_buf_a, (uint32_t *)i2s_rx_buf_a);
+	audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_b, (uint32_t *)i2s_rx_buf_b);
 
 	err = bt_enable(NULL);
 	if (err != 0) {
