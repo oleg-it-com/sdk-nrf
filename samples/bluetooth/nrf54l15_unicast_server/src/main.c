@@ -40,6 +40,7 @@
 #include <nrfx_i2s.h>
 #include <nrfx_clock.h>
 #include <pcm_mix.h>
+#include <dk_buttons_and_leds.h>
 #include "lc3.h"
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -266,10 +267,9 @@ void dac_i2c_write(const struct i2c_dt_spec *dev_i2c, uint8_t reg, uint8_t value
 		//        reg);
 	}
 }
-
+static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(I2C_NODE);
 void tlv320_setup(void)
 {
-	static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(I2C_NODE);
 
 	if (!device_is_ready(dev_i2c.bus)) {
 		printf("I2C bus %s is not ready!\n", dev_i2c.bus->name);
@@ -652,7 +652,18 @@ static void stream_recv_lc3_codec(struct bt_bap_stream *stream, const struct bt_
 	if (buf_size != prev_buf_size) {
 		prev_buf_size = buf_size;
 		//LOG_INF("I2S TX ring buffer space: %d bytes", buf_size);
-		LOG_INF("%d", buf_size * 100 / (I2S_SAMPLES_NUM * 2 * sizeof(uint16_t)*BUFFER_SPACE));
+		int16_t buf_size_percent = buf_size * 100 / (I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) * BUFFER_SPACE);
+		LOG_INF("%d", buf_size_percent);
+		if (buf_size_percent < 45) {
+			dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		    dac_i2c_write(&dev_i2c, 0x08, 0xDA); // D[7:0] for D=3760
+		} else if (buf_size_percent >= 40 && buf_size_percent <= 55) {
+			dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+			dac_i2c_write(&dev_i2c, 0x08, 0xB0); // D[7:0] for D=3760
+		} else {
+			dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		    dac_i2c_write(&dev_i2c, 0x08, 0x86); // D[7:0] for D=3760
+		}
 	}
 
 	for (int i = 0; i < frames_per_sdu; i++) {
@@ -844,6 +855,47 @@ static int set_available_contexts(void)
 	return 0;
 }
 
+#define KEY_LEFT_MASK	DK_BTN1_MSK
+/* Key used to move cursor up */
+#define KEY_UP_MASK	DK_BTN2_MSK
+/* Key used to move cursor right */
+#define KEY_RIGHT_MASK	DK_BTN3_MSK
+/* Key used to move cursor down */
+#define KEY_DOWN_MASK	DK_BTN4_MSK
+
+/* Handles button state changes and adjusts PDM gain accordingly */
+static void button_changed(uint32_t button_state, uint32_t has_changed)
+{
+	uint32_t buttons = button_state & has_changed;
+
+	if (buttons & DK_BTN1_MSK) {
+		LOG_INF("Button 1 pressed, 48000");
+		//k_sleep(K_MSEC(100));
+		dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		dac_i2c_write(&dev_i2c, 0x08, 0xB0); // D[7:0] for D=3760
+	}
+	if (buttons & DK_BTN2_MSK) {
+		LOG_INF("Button 2 pressed");
+	}
+	if (buttons & DK_BTN3_MSK) {
+		LOG_INF("Button 3 pressed, 47995");
+		dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		dac_i2c_write(&dev_i2c, 0x08, 0x9C); // D[7:0] for D=3760
+		//k_sleep(K_MSEC(100));
+		//dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		//dac_i2c_write(&dev_i2c, 0x08, 0xB0); // D[7:0] for D=3760
+	}
+	if (buttons & DK_BTN4_MSK) {
+		LOG_INF("Button 4 pressed, 48005");
+		dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		dac_i2c_write(&dev_i2c, 0x08, 0xC4); // D[7:0] for D=3760
+		//k_sleep(K_MSEC(100));
+		//dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
+		//dac_i2c_write(&dev_i2c, 0x08, 0xB0); // D[7:0] for D=3760
+	}
+
+}
+
 int main(void)
 {
 	int err;
@@ -851,12 +903,17 @@ int main(void)
 	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	gpio_pin_configure_dt(&rst, GPIO_OUTPUT);
-	gpio_pin_configure(gpio, 4, GPIO_INPUT|GPIO_PULL_UP);
 
 	clocks_start();
 	gpio_pin_set_dt(&rst, 0); // Reset high
 	k_sleep(K_MSEC(1000));	  // Wait for reset to take effect
 	gpio_pin_set_dt(&rst, 1); // Reset high
+
+	err = dk_buttons_init(button_changed);
+	if (err) {
+		LOG_ERR("Cannot init buttons (err: %d)", err);
+	}
+
 	tlv320_setup();
 
 	audio_i2s_init();
@@ -874,7 +931,7 @@ int main(void)
 	}
 
 	err = gpio_pin_get(gpio, 4);
-	if (err == 0) {
+	if (err == 1) {
 		if (IS_ENABLED(CONFIG_SETTINGS)) {
 			LOG_WRN("Clearing all bonds");
 
