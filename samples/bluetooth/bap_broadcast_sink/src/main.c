@@ -50,8 +50,8 @@ static const struct device *gpio;
 #include <zephyr/drivers/i2c.h>
 #define I2C_NODE DT_NODELABEL(tlv320)
 
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-static const struct gpio_dt_spec rst = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
+//static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+//static const struct gpio_dt_spec rst = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
 
 #define I2S_NL DT_NODELABEL(i2s20)
 PINCTRL_DT_DEFINE(I2S_NL);
@@ -753,7 +753,7 @@ static void broadcast_sink_stopped_cb(struct bt_bap_broadcast_sink *sink, uint8_
 	printk("Broadcast sink %p stopped with reason 0x%02X\n", sink, reason);
 
 	for (int i = 0; i < 2; i++) {
-		lc3_decoder[i] == NULL;
+		lc3_decoder[i] = NULL;
 	}
 	k_msgq_purge(&recv_pkt_msgq_l);
 	k_msgq_purge(&recv_pkt_msgq_r);
@@ -1512,7 +1512,7 @@ static uint32_t select_bis_sync_bitfield(struct base_data *base_sg_data,
 int main(void)
 {
 	int err;
-
+/*
 	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	gpio_pin_configure_dt(&rst, GPIO_OUTPUT);
@@ -1521,7 +1521,7 @@ int main(void)
 	gpio_pin_set_dt(&rst, 0); // Reset high
 	k_sleep(K_MSEC(1000));	  // Wait for reset to take effect
 	gpio_pin_set_dt(&rst, 1); // Reset high
-
+*/
 	err = init();
 	if (err) {
 		printk("Init failed (err %d)\n", err);
