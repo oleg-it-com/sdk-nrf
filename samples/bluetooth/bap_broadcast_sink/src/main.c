@@ -50,7 +50,7 @@ static const struct device *gpio;
 #include <zephyr/drivers/i2c.h>
 #define I2C_NODE DT_NODELABEL(tlv320)
 
-//static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 //static const struct gpio_dt_spec rst = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
 
 #define I2S_NL DT_NODELABEL(i2s20)
@@ -410,7 +410,7 @@ static void stream_disconnected_cb(struct bt_bap_stream *bap_stream, uint8_t rea
 static void stream_started_cb(struct bt_bap_stream *bap_stream)
 {
 	printk("Stream %p started\n", bap_stream);
-
+	gpio_pin_set_dt(&led, 1);
 	struct bt_iso_info bt_iso_info_test;
 	bt_iso_chan_get_info(&bap_stream->ep->iso->chan, &bt_iso_info_test);
 	printk("-------latency = %d\n", bt_iso_info_test.sync_receiver.latency);
@@ -420,7 +420,7 @@ static void stream_started_cb(struct bt_bap_stream *bap_stream)
 static void stream_stopped_cb(struct bt_bap_stream *bap_stream, uint8_t reason)
 {
 	int err;
-
+	gpio_pin_set_dt(&led, 0);
 	printk("Stream %p stopped with reason 0x%02X\n", bap_stream, reason);
 
 	err = k_sem_take(&sem_stream_started, K_NO_WAIT);
@@ -1512,12 +1512,15 @@ static uint32_t select_bis_sync_bitfield(struct base_data *base_sg_data,
 int main(void)
 {
 	int err;
+
+	clocks_start();
+	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 /*
 	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	gpio_pin_configure_dt(&rst, GPIO_OUTPUT);
 
-	clocks_start();
+	
 	gpio_pin_set_dt(&rst, 0); // Reset high
 	k_sleep(K_MSEC(1000));	  // Wait for reset to take effect
 	gpio_pin_set_dt(&rst, 1); // Reset high
