@@ -266,6 +266,9 @@ void dac_i2c_write(const struct i2c_dt_spec *dev_i2c, uint8_t reg, uint8_t value
 	}
 }
 static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(I2C_NODE);
+#define DEFAULT_VOLUME -60
+#define VOLUME_STEP 5
+static int8_t volume = DEFAULT_VOLUME;
 void tlv320_setup(void)
 {
 
@@ -316,8 +319,8 @@ void tlv320_setup(void)
 
 	dac_i2c_write(&dev_i2c, 0x00, 0x00);
 	dac_i2c_write(&dev_i2c, 0x3F, 0xD4);
-	dac_i2c_write(&dev_i2c, 0x41, -60);
-	dac_i2c_write(&dev_i2c, 0x42, -60);
+	dac_i2c_write(&dev_i2c, 0x41, volume);
+	dac_i2c_write(&dev_i2c, 0x42, volume);
 	dac_i2c_write(&dev_i2c, 0x40, 0x00);
 	dac_i2c_write(&dev_i2c, 0x00, 0x00);
 }
@@ -1508,14 +1511,42 @@ static uint32_t select_bis_sync_bitfield(struct base_data *base_sg_data,
 
 	return result;
 }
-
+#include <dk_buttons_and_leds.h>
+#define VOLUME_MAX 0
+#define VOLUME_MIN -100
+static void button_handler(uint32_t button_state, uint32_t has_changed)
+{
+	if (has_changed) {
+		if ((button_state & DK_BTN1_MSK) == DK_BTN1_MSK) {
+			
+			volume += VOLUME_STEP;
+			if (volume >= VOLUME_MAX) {
+				volume = VOLUME_MAX;
+			}
+			printk("Button1 pressed, volume = %d\n", volume);
+			dac_i2c_write(&dev_i2c, 0x41, volume);
+			dac_i2c_write(&dev_i2c, 0x42, volume);
+		}
+		if ((button_state & DK_BTN2_MSK) == DK_BTN2_MSK) {
+			
+			volume -= VOLUME_STEP;
+			if (volume <= VOLUME_MIN) {
+				volume = VOLUME_MIN;
+			}
+			printk("Button2 pressed, volume = %d\n", volume);
+			dac_i2c_write(&dev_i2c, 0x41, volume);
+			dac_i2c_write(&dev_i2c, 0x42, volume);			
+		}
+		
+	}
+}
 int main(void)
 {
 	int err;
 
 	clocks_start();
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
-
+	dk_buttons_init(button_handler);
 
 /*
 	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -1535,7 +1566,7 @@ int main(void)
 	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio2));
     gpio_pin_configure(gpio, 2, GPIO_OUTPUT);
     gpio_pin_set_raw(gpio, 2, 0);
-    k_sleep(K_MSEC(100));     // Wait for reset to take effect
+    k_sleep(K_MSEC(200));     // Wait for reset to take effect
     gpio_pin_set_raw(gpio, 2, 1);
 
 	tlv320_setup();
@@ -1544,7 +1575,7 @@ int main(void)
 
 	audio_i2s_start((uint8_t *)i2s_tx_buf_a, (uint32_t *)i2s_rx_buf_a);
 	audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_b, (uint32_t *)i2s_rx_buf_b);
-	k_sleep(K_MSEC(100)); // Let I2S start properly
+	k_sleep(K_MSEC(200)); // Let I2S start properly
 	while (true) {
 		uint8_t stream_count;
 		uint32_t sync_bitfield;
