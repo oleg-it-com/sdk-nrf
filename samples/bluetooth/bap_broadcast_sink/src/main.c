@@ -517,9 +517,9 @@ static void stream_recv_cb(struct bt_bap_stream *bap_stream, const struct bt_iso
 			if (buf_size != prev_buf_size) {
 				prev_buf_size = buf_size;
 				//LOG_INF("I2S TX ring buffer space: %d bytes", buf_size);
-				int16_t buf_size_percent = buf_size * 100 / (I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) * BUFFER_SPACE);
+				uint16_t buf_size_percent = buf_size * 100 / (I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) * BUFFER_SPACE);
 				//LOG_INF("%d", buf_size_percent);
-				printk("%d\n", buf_size_percent);
+				//printk("%d\n", buf_size_percent);
 				
 				if (buf_size_percent < 45) {
 					dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
@@ -1515,6 +1515,8 @@ int main(void)
 
 	clocks_start();
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
+
+
 /*
 	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
@@ -1530,13 +1532,19 @@ int main(void)
 		printk("Init failed (err %d)\n", err);
 		return 0;
 	}
+	gpio = DEVICE_DT_GET(DT_NODELABEL(gpio2));
+    gpio_pin_configure(gpio, 2, GPIO_OUTPUT);
+    gpio_pin_set_raw(gpio, 2, 0);
+    k_sleep(K_MSEC(100));     // Wait for reset to take effect
+    gpio_pin_set_raw(gpio, 2, 1);
+
 	tlv320_setup();
 
 	audio_i2s_init();
 
 	audio_i2s_start((uint8_t *)i2s_tx_buf_a, (uint32_t *)i2s_rx_buf_a);
 	audio_i2s_set_next_buf((const uint8_t *)i2s_tx_buf_b, (uint32_t *)i2s_rx_buf_b);
-
+	k_sleep(K_MSEC(100)); // Let I2S start properly
 	while (true) {
 		uint8_t stream_count;
 		uint32_t sync_bitfield;
