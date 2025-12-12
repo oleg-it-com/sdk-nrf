@@ -43,7 +43,6 @@
 #include <zephyr/drivers/gpio.h>
 static const struct device *gpio;
 
-#include "nrf54l15.h"
 #if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
 #endif /* defined(NRF54L15_XXAA) */
@@ -55,7 +54,7 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 
 #define I2S_NL DT_NODELABEL(i2s20)
 PINCTRL_DT_DEFINE(I2S_NL);
-static nrfx_i2s_t i2s_inst = NRFX_I2S_INSTANCE(20);
+static nrfx_i2s_t i2s_inst = NRFX_I2S_INSTANCE(NRF_I2S20);
 static nrfx_i2s_config_t cfg = {
 	/* Pins are configured by pinctrl. */
 	.skip_gpio_cfg = true,
@@ -64,10 +63,12 @@ static nrfx_i2s_config_t cfg = {
 	.mode = NRF_I2S_MODE_SLAVE,
 	.format = NRF_I2S_FORMAT_I2S,
 	.alignment = NRF_I2S_ALIGN_LEFT,
-	.ratio = NRF_I2S_RATIO_64X,
+	.prescalers = {
+		.ratio = NRF_I2S_RATIO_64X,
+		.mck_setup = NRF_I2S_MCK_32MDIV2,
+	},
 	.sample_width = NRF_I2S_SWIDTH_16BIT,
 	.channels = NRF_I2S_CHANNELS_STEREO,
-	.mck_setup = NRF_I2S_MCK_32MDIV2,
 };
 
 #define I2S_SAMPLES_NUM 48 // samples per 1ms block
@@ -83,11 +84,8 @@ RING_BUF_DECLARE(i2s_tx_ring_buf, I2S_SAMPLES_NUM * 2 * sizeof(uint16_t) * BUFFE
 #define MAX_FRAME_DURATION_US 10000
 #define MAX_NUM_SAMPLES	      ((MAX_FRAME_DURATION_US * MAX_SAMPLE_RATE) / USEC_PER_SEC)
 
-static int16_t audio_buf[MAX_NUM_SAMPLES * 2];
 static lc3_decoder_t lc3_decoder[2];
 static lc3_decoder_mem_48k_t lc3_decoder_mem[2];
-static int frames_per_sdu;
-
 
 BUILD_ASSERT(IS_ENABLED(CONFIG_SCAN_SELF) || IS_ENABLED(CONFIG_SCAN_OFFLOAD),
 	     "Either SCAN_SELF or SCAN_OFFLOAD must be enabled");
@@ -145,10 +143,10 @@ void audio_i2s_set_next_buf(const uint8_t *tx_buf, uint32_t *rx_buf)
 					    .p_tx_buffer = (uint32_t *)tx_buf,
 					    .buffer_size = I2S_SAMPLES_NUM};
 
-	nrfx_err_t ret;
+	int ret;
 
 	ret = nrfx_i2s_next_buffers_set(&i2s_inst, &i2s_buf);
-	if (ret != NRFX_SUCCESS) {
+	if (ret != 0) {
 		printf("Failed to set next buffers: %x\n", ret);
 	}
 }
@@ -203,8 +201,8 @@ void audio_i2s_init(void)
 		return;
 	}
 
-	IRQ_CONNECT(DT_IRQN(I2S_NL), DT_IRQ(I2S_NL, priority), nrfx_isr, nrfx_i2s_20_irq_handler,
-		    0);
+	IRQ_CONNECT(DT_IRQN(I2S_NL), DT_IRQ(I2S_NL, priority), nrfx_i2s_irq_handler,
+		    &i2s_inst, 0);
 	irq_enable(DT_IRQN(I2S_NL));
 
 	ret = nrfx_i2s_init(&i2s_inst, &cfg, i2s_comp_handler);
@@ -525,14 +523,17 @@ static void stream_recv_cb(struct bt_bap_stream *bap_stream, const struct bt_iso
 				//printk("%d\n", buf_size_percent);
 				
 				if (buf_size_percent < 45) {
-					dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
-					dac_i2c_write(&dev_i2c, 0x08, 0xDA); // D[7:0] for D=3760
+					// Speed up the sampling rate to 48037.5 Hz
+					dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3802
+					dac_i2c_write(&dev_i2c, 0x08, 0xDA); // D[7:0] for D=3802
 				} else if (buf_size_percent >= 40 && buf_size_percent <= 55) {
+					// Keep the sampling rate at 48000 Hz
 					dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
 					dac_i2c_write(&dev_i2c, 0x08, 0xB0); // D[7:0] for D=3760
 				} else {
-					dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3760
-					dac_i2c_write(&dev_i2c, 0x08, 0x86); // D[7:0] for D=3760
+					// Speed down the sampling rate to 47962.5 Hz
+					dac_i2c_write(&dev_i2c, 0x07, 0x0E); // D[13:8] for D=3718
+					dac_i2c_write(&dev_i2c, 0x08, 0x86); // D[7:0] for D=3718
 				}
 				
 			}
